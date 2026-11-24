@@ -1,0 +1,178 @@
+//@version=5
+// Order Blocks, recreated for research (ICT / Smart Money Concepts definition).
+//
+// Same rules as the Python version in orderblock_research/ob/ (detect.py + backtest.py):
+//   * Swing high/low = pivot with `Swing length` bars on each side. A pivot is only used
+//     once those right-hand bars have closed, so there is no look-ahead.
+//   * Bullish OB: when a bar CLOSES above the last swing high, take the lowest low between
+//     that swing high and the break; the order block is the last down-close candle at or
+//     just before that low (or the lowest-low candle itself). Zone = its full range, or
+//     open-to-low. Bearish is the mirror image.
+//   * Buy limit at the zone top (or midpoint), stop at the zone bottom, target = entry + R x risk.
+//     The order goes live on the bar AFTER the break. Only the first touch counts, and an
+//     unfilled order is cancelled after N bars.
+//   * Broken zones stay on the chart. Many indicators delete them, which hides the failures.
+//
+// Differences from the Python study: TradingView trades one position at a time, so an order
+// block touched while a position is open is used up without a trade. Fill details follow
+// TradingView's broker emulator (set commission and slippage below to match your market).
+// Not compiled here: no Pine compiler was available when this was written. If TradingView
+// reports an error, paste it back and it can be fixed.
+strategy("Order Blocks - recreated (research)", overlay=true, pyramiding=0,
+     initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.01,
+     slippage=1, max_boxes_count=300, max_bars_back=1000)
+
+swingLen  = input.int(5, "Swing length", minval=1)
+obRule    = input.string("Last opposite candle", "Order-block candle", options=["Last opposite candle", "Extreme candle"])
+zoneMode  = input.string("Wick", "Zone", options=["Wick", "Body"])
+needFvg   = input.bool(false, "Require a fair value gap (displacement)")
+entryMode = input.string("Proximal edge", "Entry", options=["Proximal edge", "Midpoint"])
+rr        = input.float(2.0, "Target, R multiple", minval=0.5, step=0.5)
+maxAge    = input.int(100, "Cancel unfilled order after N bars", minval=1)
+maxSearch = input.int(10, "Bars searched back for the opposite candle", minval=1)
+riskPct   = input.float(1.0, "Risk per trade, % of equity", minval=0.1, step=0.1)
+minRisk   = input.float(0.1, "Skip zones thinner than N x ATR", minval=0.0, step=0.05)
+showZones = input.bool(true, "Draw zones")
+
+LOOKBACK_CAP = 500
+atr14 = ta.sma(ta.tr(true), 14)
+
+// ---------------------------------------------------------------- swing points
+var float shPrice = na
+var int   shBar   = na
+var bool  shUsed  = true
+var float slPrice = na
+var int   slBar   = na
+var bool  slUsed  = true
+
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+if not na(ph)
+    shPrice := ph
+    shBar   := bar_index - swingLen
+    shUsed  := false
+if not na(pl)
+    slPrice := pl
+    slBar   := bar_index - swingLen
+    slUsed  := false
+
+// ---------------------------------------------------------------- pending order blocks
+var bool  bActive = false
+var float bEntry  = na
+var float bStop   = na
+var float bTarget = na
+var int   bBorn   = na
+var box   bBox    = na
+
+var bool  sActive = false
+var float sEntry  = na
+var float sStop   = na
+var float sTarget = na
+var int   sBorn   = na
+var box   sBox    = na
+
+// 1. The first touch uses a zone up (filled, or touched while a position was open).
+if bActive and bar_index > bBorn and low <= bEntry
+    bActive := false
+if sActive and bar_index > sBorn and high >= sEntry
+    sActive := false
+if bActive and bar_index - bBorn >= maxAge
+    bActive := false
+if sActive and bar_index - sBorn >= maxAge
+    sActive := false
+if bActive and showZones
+    box.set_right(bBox, bar_index)
+if sActive and showZones
+    box.set_right(sBox, bar_index)
+
+// 2. Bullish break of structure -> new bullish order block.
+if not shUsed and not na(shPrice) and close > shPrice
+    shUsed := true
+    n = math.min(bar_index - shBar - 1, LOOKBACK_CAP)
+    if n >= 1
+        int   mOff = 1
+        float mLow = low[1]
+        for i = 1 to n
+            if low[i] < mLow
+                mLow := low[i]
+                mOff := i
+        int kOff = mOff
+        if obRule == "Last opposite candle"
+            lim = math.min(mOff + maxSearch, n)
+            for i = mOff to lim
+                if close[i] < open[i]
+                    kOff := i
+                    break
+        top = zoneMode == "Wick" ? high[kOff] : math.max(open[kOff], close[kOff])
+        bot = low[kOff]
+        bool fvg = false
+        if kOff >= 2
+            for j = 0 to kOff - 2
+                if low[j] > high[j + 2]
+                    fvg := true
+                    break
+        entry = entryMode == "Proximal edge" ? top : (top + bot) / 2
+        risk  = entry - bot
+        if close > top and (fvg or not needFvg) and risk > 0 and risk >= minRisk * atr14
+            bActive := true
+            bEntry  := entry
+            bStop   := bot
+            bTarget := entry + rr * risk
+            bBorn   := bar_index
+            if showZones
+                bBox := box.new(bar_index - kOff, top, bar_index, bot,
+                     border_color=color.new(color.blue, 40), bgcolor=color.new(color.blue, 85))
+
+// 3. Bearish break of structure -> new bearish order block.
+if not slUsed and not na(slPrice) and close < slPrice
+    slUsed := true
+    n = math.min(bar_index - slBar - 1, LOOKBACK_CAP)
+    if n >= 1
+        int   mOff  = 1
+        float mHigh = high[1]
+        for i = 1 to n
+            if high[i] > mHigh
+                mHigh := high[i]
+                mOff  := i
+        int kOff = mOff
+        if obRule == "Last opposite candle"
+            lim = math.min(mOff + maxSearch, n)
+            for i = mOff to lim
+                if close[i] > open[i]
+                    kOff := i
+                    break
+        top = high[kOff]
+        bot = zoneMode == "Wick" ? low[kOff] : math.min(open[kOff], close[kOff])
+        bool fvg = false
+        if kOff >= 2
+            for j = 0 to kOff - 2
+                if high[j] < low[j + 2]
+                    fvg := true
+                    break
+        entry = entryMode == "Proximal edge" ? bot : (top + bot) / 2
+        risk  = top - entry
+        if close < bot and (fvg or not needFvg) and risk > 0 and risk >= minRisk * atr14
+            sActive := true
+            sEntry  := entry
+            sStop   := top
+            sTarget := entry - rr * risk
+            sBorn   := bar_index
+            if showZones
+                sBox := box.new(bar_index - kOff, top, bar_index, bot,
+                     border_color=color.new(color.orange, 40), bgcolor=color.new(color.orange, 85))
+
+// 4. Orders: a bracket (limit entry + stop + target) while flat and the zone is fresh.
+flat = strategy.position_size == 0
+if flat and bActive
+    strategy.entry("OB Long", strategy.long, qty=strategy.equity * riskPct / 100 / (bEntry - bStop), limit=bEntry)
+    strategy.exit("OB Long exit", "OB Long", stop=bStop, limit=bTarget)
+else
+    strategy.cancel("OB Long")
+if flat and sActive
+    strategy.entry("OB Short", strategy.short, qty=strategy.equity * riskPct / 100 / (sStop - sEntry), limit=sEntry)
+    strategy.exit("OB Short exit", "OB Short", stop=sStop, limit=sTarget)
+else
+    strategy.cancel("OB Short")
+
+plot(bActive ? bEntry : na, "Long limit", color.new(color.blue, 0), 1, plot.style_linebr)
+plot(sActive ? sEntry : na, "Short limit", color.new(color.orange, 0), 1, plot.style_linebr)

@@ -1,0 +1,10 @@
+numpy>=2.0
+pandas>=2.2
+matplotlib>=3.8
+# bundled historical price data
+arch>=7.0
+backtesting>=0.6
+gym-anytrading>=2.0
+# reference open-source order-block implementation (bias comparison)
+smartmoneyconcepts>=0.0.26
+pytest>=8.0
